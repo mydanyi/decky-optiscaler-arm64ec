@@ -36,6 +36,14 @@ WANTED_DIRS = ("licenses/",)
 DLL_NAME = "OptiScaler.dll"
 INI_NAME = "OptiScaler.ini"
 
+# An optional ASI plugin that patches games gating DLSS behind their own checks.
+# Published to a rolling tag as one unversioned .asi, so also keyed on sha256.
+PATCHER_REPO = "optiscaler/OptiPatcher"
+PATCHER_TAG = "rolling"
+PATCHER_NAME = "OptiPatcher.asi"
+PATCHER_URL = f"https://github.com/{PATCHER_REPO}/releases/tag/{PATCHER_TAG}"
+_BASE_VERSION = re.compile(r"Base version:\**\s*(v[\d.]+)", re.IGNORECASE)
+
 
 class ReleaseError(Exception):
     pass
@@ -361,3 +369,145 @@ def ensure_build(allow_network: bool = True) -> dict:
     if not allow_network:
         raise ReleaseError("No OptiScaler build cached and network use not allowed")
     return fetch_release(remote_release())
+
+
+# --------------------------------------------------------------------------
+# OptiPatcher
+# --------------------------------------------------------------------------
+
+def patcher_dir() -> Path:
+    return paths.cache_dir() / "optipatcher"
+
+
+def _patcher_meta_path() -> Path:
+    return patcher_dir() / "release.json"
+
+
+def patcher_file() -> Path:
+    return patcher_dir() / PATCHER_NAME
+
+
+def remote_patcher(timeout: float = 20.0) -> dict:
+    try:
+        release = _api_get(f"{API_ROOT}/repos/{PATCHER_REPO}/releases/tags/{PATCHER_TAG}",
+                           timeout)
+    except urllib.error.HTTPError as exc:
+        raise ReleaseError(f"GitHub returned HTTP {exc.code} for OptiPatcher") from exc
+    except urllib.error.URLError as exc:
+        raise ReleaseError(f"Could not reach GitHub: {exc.reason}") from exc
+
+    asset = None
+    for candidate in release.get("assets") or []:
+        if candidate.get("name") == PATCHER_NAME:
+            asset = candidate
+            break
+    if asset is None:
+        raise ReleaseError(f"No {PATCHER_NAME} in the OptiPatcher release")
+
+    digest = asset.get("digest") or ""
+    sha256 = digest.split("sha256:", 1)[1] if "sha256:" in digest else ""
+    body = release.get("body") or ""
+    match = _BASE_VERSION.search(body)
+    return {
+        "asset_name": PATCHER_NAME,
+        "asset_url": asset.get("browser_download_url") or "",
+        "size": asset.get("size") or 0,
+        "sha256": sha256,
+        "version": match.group(1) if match else (sha256[:7] or PATCHER_TAG),
+        "published_at": release.get("published_at") or release.get("updated_at") or "",
+        "html_url": release.get("html_url") or PATCHER_URL,
+        "fetched_at": int(time.time()),
+    }
+
+
+def local_patcher() -> Optional[dict]:
+    if not patcher_file().is_file():
+        return None
+    try:
+        with open(_patcher_meta_path(), "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {"version": "unknown", "sha256": "", "asset_name": PATCHER_NAME}
+
+
+def _adopt_local_patcher() -> Optional[dict]:
+    for directory in (patcher_dir(), paths.runtime_dir() / "import",
+                      paths.user_home() / "Downloads", paths.user_home() / "Desktop"):
+        candidate = directory / PATCHER_NAME
+        if not candidate.is_file():
+            continue
+        patcher_dir().mkdir(parents=True, exist_ok=True)
+        if candidate.resolve() != patcher_file().resolve():
+            shutil.copy2(candidate, patcher_file())
+        digest = sha256_of(patcher_file())
+        meta = {"asset_name": PATCHER_NAME, "sha256": digest,
+                "version": digest[:7], "source": "local",
+                "html_url": PATCHER_URL, "installed_at": int(time.time())}
+        _write_patcher_meta(meta)
+        return meta
+    return None
+
+
+def _write_patcher_meta(meta: dict) -> None:
+    patcher_dir().mkdir(parents=True, exist_ok=True)
+    tmp = _patcher_meta_path().with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(meta, handle, indent=2)
+    tmp.replace(_patcher_meta_path())
+
+
+def fetch_patcher(meta: dict,
+                  progress: Optional[Callable[[int, int], None]] = None) -> dict:
+    patcher_dir().mkdir(parents=True, exist_ok=True)
+    cached = local_patcher()
+    if cached and meta.get("sha256") and cached.get("sha256") == meta["sha256"]:
+        return cached
+    if not meta.get("asset_url"):
+        raise ReleaseError("No download URL for OptiPatcher")
+    _download(meta["asset_url"], patcher_file(), meta.get("sha256", ""),
+              meta.get("size", 0), progress)
+    stored = dict(meta, source="download", installed_at=int(time.time()))
+    _write_patcher_meta(stored)
+    return stored
+
+
+def ensure_patcher(allow_network: bool = True) -> dict:
+    local = local_patcher()
+    if local is not None:
+        return local
+    adopted = _adopt_local_patcher()
+    if adopted is not None:
+        return adopted
+    if not allow_network:
+        raise ReleaseError("OptiPatcher is not cached and network use not allowed")
+    return fetch_patcher(remote_patcher())
+
+
+def patcher_status(check_remote: bool = False, timeout: float = 20.0) -> dict:
+    local = local_patcher()
+    result = {
+        "installed": local is not None,
+        "local_version": (local or {}).get("version", ""),
+        "local_sha256": (local or {}).get("sha256", ""),
+        "update_available": False,
+        "remote_version": "",
+        "release_url": PATCHER_URL,
+        "error": "",
+    }
+    if not check_remote:
+        return result
+    try:
+        remote = remote_patcher(timeout)
+    except ReleaseError as exc:
+        result["error"] = str(exc)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"OptiPatcher update check failed: {exc}"
+        return result
+
+    result["remote_version"] = remote["version"]
+    if local is None:
+        result["update_available"] = True
+    elif remote.get("sha256") and local.get("sha256"):
+        result["update_available"] = remote["sha256"] != local["sha256"]
+    return result

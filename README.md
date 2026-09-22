@@ -12,7 +12,8 @@ Experimental (ARM64).
   there is no network.
 - Installs the DLL into the game root and into every directory holding a
   64-bit executable, because Wine resolves it per directory.
-- Per-game loader DLL name and NVIDIA spoofing.
+- Per-game loader DLL name, NVIDIA spoofing and OptiPatcher, each off or
+  defaulted until you change it.
 - Sets the game's launch options to run a wrapper that exports
   `WINEDLLOVERRIDES`, so nothing has to be edited by hand.
 - Backs up any file it replaces and restores it on uninstall.

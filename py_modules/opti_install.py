@@ -33,6 +33,11 @@ DEFAULT_DLL = "dxgi.dll"
 INI_NAME = "OptiScaler.ini"
 FILES_WE_LEAVE = ("OptiScaler.log", "OptiScaler.ini.bak")
 
+# The default the shipped ini documents for [Plugins] Path, so the file goes
+# here and Path stays at auto.
+PATCHER_REL = "OptiScaler/plugins/OptiPatcher.asi"
+PATCHER_DIRS = ("OptiScaler/plugins", "OptiScaler")
+
 
 class InstallError(Exception):
     pass
@@ -99,9 +104,15 @@ def spoof_overrides(enabled: bool) -> list:
     ]
 
 
-def render_ini(source_text: str, spoof_nvidia: bool) -> str:
+def plugin_overrides(load_patcher: bool) -> list:
+    return [("Plugins", "LoadAsiPlugins", "true" if load_patcher else "false")]
+
+
+def render_ini(source_text: str, spoof_nvidia: bool, load_patcher: bool = False) -> str:
     text = source_text
     for section, key, value in spoof_overrides(spoof_nvidia):
+        text = ini_set(text, section, key, value)
+    for section, key, value in plugin_overrides(load_patcher):
         text = ini_set(text, section, key, value)
     return text
 
@@ -141,7 +152,8 @@ def _back_up(target: Path, marker: Optional[dict], backups: dict) -> None:
 
 
 def install_into(directory: Path, build: Path, dll_name: str,
-                 spoof_nvidia: bool, version: str) -> dict:
+                 spoof_nvidia: bool, version: str,
+                 patcher_src: Optional[Path] = None) -> dict:
     if dll_name not in VALID_DLLS:
         raise InstallError(f"Unsupported DLL name: {dll_name}")
     if not directory.is_dir():
@@ -169,11 +181,24 @@ def install_into(directory: Path, build: Path, dll_name: str,
     shutil.copy2(source_dll, dll_target)
     created.append(dll_name)
 
+    # Turning it off removes the file as well as clearing the key: a stale .asi
+    # would load again the moment anything else set LoadAsiPlugins.
+    if patcher_src is not None:
+        patcher_target = directory / PATCHER_REL
+        patcher_target.parent.mkdir(parents=True, exist_ok=True)
+        _back_up(patcher_target, marker, backups)
+        shutil.copy2(patcher_src, patcher_target)
+        created.append(PATCHER_REL)
+    elif marker and PATCHER_REL in (marker.get("files") or []):
+        _restore_one(directory, PATCHER_REL, marker)
+        _prune_dirs(directory)
+
     ini_target = directory / INI_NAME
     _back_up(ini_target, marker, backups)
     ini_text = source_ini.read_text(encoding="utf-8", errors="replace") \
         if source_ini.is_file() else "[Spoofing]\n"
-    ini_target.write_text(render_ini(ini_text, spoof_nvidia), encoding="utf-8")
+    ini_target.write_text(
+        render_ini(ini_text, spoof_nvidia, patcher_src is not None), encoding="utf-8")
     created.append(INI_NAME)
 
     record = {
@@ -181,6 +206,7 @@ def install_into(directory: Path, build: Path, dll_name: str,
         "version": version,
         "dll": dll_name,
         "spoof_nvidia": bool(spoof_nvidia),
+        "optipatcher": patcher_src is not None,
         "files": created,
         "backups": backups,
         "installed_at": int(time.time()),
@@ -201,6 +227,14 @@ def _restore_one(directory: Path, filename: str, marker: dict) -> None:
             log.info("restored %s", target)
 
 
+def _prune_dirs(directory: Path) -> None:
+    for relative in PATCHER_DIRS:
+        try:
+            (directory / relative).rmdir()
+        except OSError:
+            break  # not empty, or not ours - leave the rest alone
+
+
 def uninstall_from(directory: Path) -> bool:
     marker = read_marker(directory)
     if marker is None:
@@ -209,6 +243,7 @@ def uninstall_from(directory: Path) -> bool:
         _restore_one(directory, filename, marker)
     for leftover in FILES_WE_LEAVE:
         (directory / leftover).unlink(missing_ok=True)
+    _prune_dirs(directory)
     (directory / MARKER).unlink(missing_ok=True)
     return True
 
@@ -237,7 +272,8 @@ def read_install_manifest(appid: str) -> Optional[dict]:
 
 
 def install_game(appid: str, target_dirs: list, dll_name: str,
-                 spoof_nvidia: bool, version: str) -> dict:
+                 spoof_nvidia: bool, version: str,
+                 patcher_src: Optional[Path] = None) -> dict:
     build = paths.build_dir()
     paths.installs_dir().mkdir(parents=True, exist_ok=True)
 
@@ -245,7 +281,8 @@ def install_game(appid: str, target_dirs: list, dll_name: str,
     for raw in target_dirs:
         directory = Path(raw)
         try:
-            install_into(directory, build, dll_name, spoof_nvidia, version)
+            install_into(directory, build, dll_name, spoof_nvidia, version,
+                         patcher_src)
             installed.append(str(directory))
         except (InstallError, OSError) as exc:
             log.error("install into %s failed: %s", directory, exc)
@@ -258,6 +295,7 @@ def install_game(appid: str, target_dirs: list, dll_name: str,
         "appid": str(appid),
         "dll": dll_name,
         "spoof_nvidia": bool(spoof_nvidia),
+        "optipatcher": patcher_src is not None,
         "version": version,
         "directories": installed,
         "failed": failed,

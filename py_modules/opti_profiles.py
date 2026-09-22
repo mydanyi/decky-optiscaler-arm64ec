@@ -15,7 +15,10 @@ SCRIPT_NAME = "optiscaler-launch.sh"
 
 DEFAULTS = {
     "default_dll": "dxgi.dll",
-    "default_spoof": True,
+    # Off by default: spoofing changes what every game sees of the GPU, and the
+    # games that need it to expose DLSS are the minority. Turn it on per game.
+    "default_spoof": False,
+    "default_optipatcher": False,
 }
 
 
@@ -48,12 +51,15 @@ def get_defaults() -> dict:
 
 
 def set_defaults(default_dll: Optional[str] = None,
-                 default_spoof: Optional[bool] = None) -> dict:
+                 default_spoof: Optional[bool] = None,
+                 default_optipatcher: Optional[bool] = None) -> dict:
     current = get_defaults()
     if default_dll:
         current["default_dll"] = default_dll
     if default_spoof is not None:
         current["default_spoof"] = bool(default_spoof)
+    if default_optipatcher is not None:
+        current["default_optipatcher"] = bool(default_optipatcher)
     _save_json(paths.defaults_config(), current)
     return current
 
@@ -69,6 +75,7 @@ def get_game(appid: str) -> dict:
         "appid": str(appid),
         "dll": stored.get("dll") or defaults["default_dll"],
         "spoof_nvidia": bool(stored.get("spoof_nvidia", defaults["default_spoof"])),
+        "optipatcher": bool(stored.get("optipatcher", defaults["default_optipatcher"])),
         "enabled": bool(stored.get("enabled", False)),
         "directories": list(stored.get("directories") or []),
         "version": stored.get("version", ""),
@@ -78,7 +85,8 @@ def get_game(appid: str) -> dict:
 def set_game(appid: str, **changes) -> dict:
     games = all_games()
     entry = games.get(str(appid)) or {}
-    for key in ("dll", "spoof_nvidia", "enabled", "directories", "version"):
+    for key in ("dll", "spoof_nvidia", "optipatcher", "enabled", "directories",
+                "version"):
         if key in changes and changes[key] is not None:
             entry[key] = changes[key]
     games[str(appid)] = entry

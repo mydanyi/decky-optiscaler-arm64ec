@@ -76,6 +76,7 @@ class Plugin:
             status = release.status(check_remote=False)
             return _ok(
                 build=status,
+                patcher=release.patcher_status(check_remote=False),
                 defaults=profiles.get_defaults(),
                 dll_choices=[{"name": n, "label": l} for n, l in installer.DLL_CHOICES],
                 launch_script=str(paths.launch_script()),
@@ -88,9 +89,10 @@ class Plugin:
     async def check_for_updates(self) -> dict:
         try:
             status = await asyncio.to_thread(release.status, True, 20.0)
+            patcher = await asyncio.to_thread(release.patcher_status, True, 20.0)
             if status.get("error"):
-                return _fail(status["error"], build=status)
-            return _ok(build=status)
+                return _fail(status["error"], build=status, patcher=patcher)
+            return _ok(build=status, patcher=patcher)
         except Exception as exc:  # noqa: BLE001
             return _fail(f"Update check failed: {exc}")
 
@@ -111,7 +113,9 @@ class Plugin:
                 return release.fetch_release(meta)
 
             meta = await asyncio.to_thread(work)
-            return _ok(build=release.status(check_remote=False), version=meta.get("version", ""))
+            return _ok(build=release.status(check_remote=False),
+                       patcher=release.patcher_status(check_remote=False),
+                       version=meta.get("version", ""))
         except release.ReleaseError as exc:
             return _fail(str(exc))
         except Exception as exc:  # noqa: BLE001
@@ -170,8 +174,21 @@ class Plugin:
         except Exception as exc:  # noqa: BLE001
             return _fail(f"Could not inspect that game: {exc}")
 
+    @staticmethod
+    # Fetched before anything is written into a game directory, so a failed
+    # download leaves the game untouched.
+    async def _patcher_source(enabled: bool):
+        if not enabled:
+            return None
+        meta = await asyncio.to_thread(release.ensure_patcher, True)
+        source = release.patcher_file()
+        if not source.is_file():
+            raise release.ReleaseError("OptiPatcher download did not produce a file")
+        log.info("using OptiPatcher %s", meta.get("version", "?"))
+        return source
+
     async def install_game(self, appid: str, dll: str, spoof_nvidia: bool,
-                           directories: list) -> dict:
+                           directories: list, optipatcher: bool = False) -> dict:
         try:
             appid = str(appid)
             if not directories:
@@ -180,13 +197,15 @@ class Plugin:
                 return _fail(f"Unsupported DLL name: {dll}")
 
             build = await asyncio.to_thread(release.ensure_build, True)
+            patcher_src = await self._patcher_source(bool(optipatcher))
             manifest = await asyncio.to_thread(
                 installer.install_game, appid, directories, dll,
-                bool(spoof_nvidia), build.get("version", ""),
+                bool(spoof_nvidia), build.get("version", ""), patcher_src,
             )
 
             profiles.write_profile(appid, dll, bool(spoof_nvidia), True)
             profiles.set_game(appid, dll=dll, spoof_nvidia=bool(spoof_nvidia),
+                              optipatcher=bool(optipatcher),
                               enabled=True, directories=manifest["directories"],
                               version=build.get("version", ""))
             return _ok(manifest=manifest, settings=profiles.get_game(appid))
@@ -206,7 +225,8 @@ class Plugin:
             return _fail(f"Uninstall failed: {exc}")
 
     async def update_game_settings(self, appid: str, dll: str,
-                                   spoof_nvidia: bool) -> dict:
+                                   spoof_nvidia: bool,
+                                   optipatcher: bool = False) -> dict:
         try:
             appid = str(appid)
             if dll not in installer.VALID_DLLS:
@@ -215,15 +235,18 @@ class Plugin:
             manifest = installer.read_install_manifest(appid)
             if manifest:
                 build = await asyncio.to_thread(release.ensure_build, True)
+                patcher_src = await self._patcher_source(bool(optipatcher))
                 manifest = await asyncio.to_thread(
                     installer.install_game, appid, manifest["directories"], dll,
-                    bool(spoof_nvidia), build.get("version", ""),
+                    bool(spoof_nvidia), build.get("version", ""), patcher_src,
                 )
                 profiles.write_profile(appid, dll, bool(spoof_nvidia), True)
                 profiles.set_game(appid, dll=dll, spoof_nvidia=bool(spoof_nvidia),
+                                  optipatcher=bool(optipatcher),
                                   enabled=True, directories=manifest["directories"])
             else:
-                profiles.set_game(appid, dll=dll, spoof_nvidia=bool(spoof_nvidia))
+                profiles.set_game(appid, dll=dll, spoof_nvidia=bool(spoof_nvidia),
+                                  optipatcher=bool(optipatcher))
 
             return _ok(settings=profiles.get_game(appid), manifest=manifest)
         except (installer.InstallError, release.ReleaseError) as exc:
@@ -243,10 +266,11 @@ class Plugin:
                     continue
                 settings = profiles.get_game(appid)
                 try:
+                    patcher_src = await self._patcher_source(settings["optipatcher"])
                     await asyncio.to_thread(
                         installer.install_game, appid, manifest["directories"],
                         settings["dll"], settings["spoof_nvidia"],
-                        build.get("version", ""),
+                        build.get("version", ""), patcher_src,
                     )
                     profiles.write_profile(appid, settings["dll"],
                                            settings["spoof_nvidia"], True)
@@ -265,11 +289,13 @@ class Plugin:
     # settings and launch options
     # ------------------------------------------------------------------
 
-    async def set_defaults(self, dll: str, spoof_nvidia: bool) -> dict:
+    async def set_defaults(self, dll: str, spoof_nvidia: bool,
+                           optipatcher: bool = False) -> dict:
         try:
             if dll not in installer.VALID_DLLS:
                 return _fail(f"Unsupported DLL name: {dll}")
-            return _ok(defaults=profiles.set_defaults(dll, bool(spoof_nvidia)))
+            return _ok(defaults=profiles.set_defaults(
+                dll, bool(spoof_nvidia), bool(optipatcher)))
         except Exception as exc:  # noqa: BLE001
             return _fail(f"Could not save defaults: {exc}")
 

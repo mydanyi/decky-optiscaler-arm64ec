@@ -15,6 +15,7 @@ import { FaExpandArrowsAlt } from "react-icons/fa";
 import {
   BuildStatus,
   DllChoice,
+  PatcherStatus,
   Game,
   GameDetails,
   PluginState,
@@ -43,6 +44,7 @@ interface PanelCache {
   details: GameDetails | null;
   dll: string;
   spoof: boolean;
+  optipatcher: boolean;
   selected: string[];
   lastGameScan: number;
 }
@@ -53,7 +55,8 @@ const cache: PanelCache = {
   appid: "",
   details: null,
   dll: "dxgi.dll",
-  spoof: true,
+  spoof: false,
+  optipatcher: false,
   selected: [],
   lastGameScan: 0,
 };
@@ -99,6 +102,7 @@ async function syncLaunchOptions(appid: string, enable: boolean): Promise<void> 
 
 function BuildSection({
   build,
+  patcher,
   busy,
   managedCount,
   onCheck,
@@ -106,6 +110,7 @@ function BuildSection({
   onRefreshInstalls,
 }: {
   build: BuildStatus;
+  patcher: PatcherStatus;
   busy: string;
   managedCount: number;
   onCheck: () => void;
@@ -125,6 +130,16 @@ function BuildSection({
           {status}
         </Field>
       </PanelSectionRow>
+
+      {patcher.installed && (
+        <PanelSectionRow>
+          <Field label="OptiPatcher" focusable={true} bottomSeparator="none">
+            {patcher.update_available
+              ? `${patcher.local_version}, update available`
+              : patcher.local_version}
+          </Field>
+        </PanelSectionRow>
+      )}
 
       <PanelSectionRow>
         <ButtonItem layout="below" disabled={busy !== ""} onClick={onCheck}>
@@ -197,6 +212,7 @@ function Content() {
   const [details, setDetails] = useCached("details");
   const [dll, setDll] = useCached("dll");
   const [spoof, setSpoof] = useCached("spoof");
+  const [optipatcher, setOptipatcher] = useCached("optipatcher");
   const [selected, setSelected] = useCached("selected");
   const [busy, setBusy] = useState<string>("");
   const [loadError, setLoadError] = useState<string>("");
@@ -245,9 +261,10 @@ function Content() {
       setDetails(result);
       setDll(result.settings.dll);
       setSpoof(result.settings.spoof_nvidia);
+      setOptipatcher(result.settings.optipatcher);
       setSelected(result.targets.filter((t) => t.selected).map((t) => t.path));
     },
-    [setDetails, setDll, setSpoof, setSelected],
+    [setDetails, setDll, setSpoof, setOptipatcher, setSelected],
   );
 
   const loadDetails = useCallback(
@@ -308,7 +325,7 @@ function Content() {
         notify("OptiScaler", result.error);
         return;
       }
-      if (cache.state) setState({ ...cache.state, build: result.build });
+      if (cache.state) setState({ ...cache.state, build: result.build, patcher: result.patcher });
       notify(
         "OptiScaler",
         result.build.update_available
@@ -330,7 +347,7 @@ function Content() {
         notify("OptiScaler", result.error);
         return;
       }
-      if (cache.state) setState({ ...cache.state, build: result.build });
+      if (cache.state) setState({ ...cache.state, build: result.build, patcher: result.patcher });
       notify("OptiScaler", `Build ${result.version} ready.`);
     } catch (error) {
       report("download_build", error);
@@ -364,7 +381,7 @@ function Content() {
     if (!appid || selected.length === 0) return;
     setBusy("install");
     try {
-      const result = await installGame(appid, dll, spoof, selected);
+      const result = await installGame(appid, dll, spoof, selected, optipatcher);
       if (!result.ok) {
         notify("OptiScaler", result.error);
         return;
@@ -408,13 +425,14 @@ function Content() {
     }
   };
 
-  const applySettings = async (nextDll: string, nextSpoof: boolean) => {
+  const applySettings = async (nextDll: string, nextSpoof: boolean, nextPatcher: boolean) => {
     setDll(nextDll);
     setSpoof(nextSpoof);
+    setOptipatcher(nextPatcher);
     if (!appid) return;
     setBusy("settings");
     try {
-      const result = await updateGameSettings(appid, nextDll, nextSpoof);
+      const result = await updateGameSettings(appid, nextDll, nextSpoof, nextPatcher);
       if (!result.ok) {
         notify("OptiScaler", result.error);
         return;
@@ -437,9 +455,9 @@ function Content() {
     }
   };
 
-  const saveDefaults = async (nextDll: string, nextSpoof: boolean) => {
+  const saveDefaults = async (nextDll: string, nextSpoof: boolean, nextPatcher: boolean) => {
     try {
-      const result = await setDefaults(nextDll, nextSpoof);
+      const result = await setDefaults(nextDll, nextSpoof, nextPatcher);
       if (result.ok && cache.state) setState({ ...cache.state, defaults: result.defaults });
     } catch (error) {
       report("set_defaults", error);
@@ -504,6 +522,7 @@ function Content() {
     <>
       <BuildSection
         build={state.build}
+        patcher={state.patcher}
         busy={busy}
         managedCount={state.managed_count}
         onCheck={runCheck}
@@ -555,7 +574,7 @@ function Content() {
                 menuLabel="Loader DLL"
                 rgOptions={dllOptions}
                 selectedOption={dll}
-                onChange={(option) => void applySettings(option.data as string, spoof)}
+                onChange={(option) => void applySettings(option.data as string, spoof, optipatcher)}
               />
             </PanelSectionRow>
 
@@ -564,7 +583,16 @@ function Content() {
                 label="NVIDIA spoofing"
                 description="Report an NVIDIA GPU so games will offer DLSS for OptiScaler to intercept."
                 checked={spoof}
-                onChange={(on: boolean) => void applySettings(dll, on)}
+                onChange={(on: boolean) => void applySettings(dll, on, optipatcher)}
+              />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+              <ToggleField
+                label="Load OptiPatcher"
+                description="Adds OptiPatcher as an OptiScaler plugin. It patches games that gate DLSS behind their own checks, so OptiScaler has something to intercept."
+                checked={optipatcher}
+                onChange={(on: boolean) => void applySettings(dll, spoof, on)}
               />
             </PanelSectionRow>
 
@@ -623,7 +651,11 @@ function Content() {
             rgOptions={dllOptions}
             selectedOption={state.defaults.default_dll}
             onChange={(option) =>
-              void saveDefaults(option.data as string, state.defaults.default_spoof)
+              void saveDefaults(
+                option.data as string,
+                state.defaults.default_spoof,
+                state.defaults.default_optipatcher,
+              )
             }
           />
         </PanelSectionRow>
@@ -631,7 +663,18 @@ function Content() {
           <ToggleField
             label="NVIDIA spoofing"
             checked={state.defaults.default_spoof}
-            onChange={(on: boolean) => void saveDefaults(state.defaults.default_dll, on)}
+            onChange={(on: boolean) =>
+              void saveDefaults(state.defaults.default_dll, on, state.defaults.default_optipatcher)
+            }
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Load OptiPatcher"
+            checked={state.defaults.default_optipatcher}
+            onChange={(on: boolean) =>
+              void saveDefaults(state.defaults.default_dll, state.defaults.default_spoof, on)
+            }
           />
         </PanelSectionRow>
       </PanelSection>

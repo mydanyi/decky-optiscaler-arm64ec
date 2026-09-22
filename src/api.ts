@@ -26,10 +26,21 @@ export interface DllChoice {
 export interface Defaults {
   default_dll: string;
   default_spoof: boolean;
+  default_optipatcher: boolean;
+}
+
+export interface PatcherStatus {
+  installed: boolean;
+  local_version: string;
+  update_available: boolean;
+  remote_version: string;
+  release_url: string;
+  error: string;
 }
 
 export interface PluginState extends Result {
   build: BuildStatus;
+  patcher: PatcherStatus;
   defaults: Defaults;
   dll_choices: DllChoice[];
   launch_script: string;
@@ -59,6 +70,7 @@ export interface GameSettings {
   appid: string;
   dll: string;
   spoof_nvidia: boolean;
+  optipatcher: boolean;
   enabled: boolean;
   directories: string[];
   version: string;
@@ -68,6 +80,7 @@ export interface InstallManifest {
   appid: string;
   dll: string;
   spoof_nvidia: boolean;
+  optipatcher: boolean;
   version: string;
   directories: string[];
   failed: { path: string; error: string }[];
@@ -82,13 +95,17 @@ export interface GameDetails extends Result {
 }
 
 export const getState = callable<[], PluginState>("get_state");
-export const checkForUpdates = callable<[], Result & { build: BuildStatus }>("check_for_updates");
-export const downloadBuild = callable<[], Result & { build: BuildStatus; version: string }>("download_build");
+export const checkForUpdates =
+  callable<[], Result & { build: BuildStatus; patcher: PatcherStatus }>("check_for_updates");
+export const downloadBuild =
+  callable<[], Result & { build: BuildStatus; patcher: PatcherStatus; version: string }>(
+    "download_build",
+  );
 export const listGames = callable<[], Result & { games: Game[] }>("list_games");
 export const getGameDetails = callable<[appid: string], GameDetails>("get_game_details");
 
 export const installGame = callable<
-  [appid: string, dll: string, spoofNvidia: boolean, directories: string[]],
+  [appid: string, dll: string, spoofNvidia: boolean, directories: string[], optipatcher: boolean],
   Result & { manifest: InstallManifest; settings: GameSettings }
 >("install_game");
 
@@ -98,7 +115,7 @@ export const uninstallGame = callable<
 >("uninstall_game");
 
 export const updateGameSettings = callable<
-  [appid: string, dll: string, spoofNvidia: boolean],
+  [appid: string, dll: string, spoofNvidia: boolean, optipatcher: boolean],
   Result & { settings: GameSettings; manifest: InstallManifest | null }
 >("update_game_settings");
 
@@ -108,7 +125,7 @@ export const refreshInstalls = callable<
 >("refresh_installs");
 
 export const setDefaults = callable<
-  [dll: string, spoofNvidia: boolean],
+  [dll: string, spoofNvidia: boolean, optipatcher: boolean],
   Result & { defaults: Defaults }
 >("set_defaults");
 
