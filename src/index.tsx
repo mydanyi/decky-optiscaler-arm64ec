@@ -134,9 +134,10 @@ function BuildSection({
       {patcher.installed && (
         <PanelSectionRow>
           <Field label="OptiPatcher" focusable={true} bottomSeparator="none">
-            {patcher.update_available
-              ? `${patcher.local_version}, update available`
-              : patcher.local_version}
+            {/* The base version stays put across rebuilds of the rolling tag,
+                so the build id is what tells two releases apart. */}
+            {[patcher.local_version, patcher.local_build].filter(Boolean).join(" · ")}
+            {patcher.update_available && ", update available"}
           </Field>
         </PanelSectionRow>
       )}

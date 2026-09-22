@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import json
 import logging
@@ -43,10 +44,97 @@ PATCHER_TAG = "rolling"
 PATCHER_NAME = "OptiPatcher.asi"
 PATCHER_URL = f"https://github.com/{PATCHER_REPO}/releases/tag/{PATCHER_TAG}"
 _BASE_VERSION = re.compile(r"Base version:\**\s*(v[\d.]+)", re.IGNORECASE)
+_BUILD_COMMIT = re.compile(r"Build commit:\**\s*([0-9a-f]{7,40})", re.IGNORECASE)
 
 
 class ReleaseError(Exception):
     pass
+
+
+# --------------------------------------------------------------------------
+# TLS trust
+# --------------------------------------------------------------------------
+
+# Where distributions keep their CA bundle. Checked in order.
+# Decky's loader is a PyInstaller bundle whose OpenSSL looks for CA certs at
+# the build distro's paths, so the default context can come up empty here.
+_CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",                        # Debian, Arch, SteamOS
+    "/etc/pki/tls/certs/ca-bundle.crt",                          # Fedora, RHEL
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",         # Fedora, ostree
+    "/etc/ssl/cert.pem",                                         # BSD, some musl
+    "/etc/ssl/ca-bundle.pem",                                    # SUSE
+)
+_CA_DIRS = ("/etc/ssl/certs", "/etc/pki/tls/certs")
+
+
+@functools.lru_cache(maxsize=1)
+def ssl_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    if _has_roots(context):
+        log.debug("TLS: using the interpreter's default trust store")
+        return context
+
+    override = os.environ.get("SSL_CERT_FILE")
+    candidates = ([override] if override else []) + list(_CA_BUNDLES)
+    for candidate in candidates:
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        try:
+            context.load_verify_locations(cafile=candidate)
+        except (OSError, ssl.SSLError):
+            continue
+        if _has_roots(context):
+            log.info("TLS: loaded CA bundle from %s", candidate)
+            return context
+
+    for directory in _CA_DIRS:
+        if not os.path.isdir(directory):
+            continue
+        try:
+            context.load_verify_locations(capath=directory)
+        except (OSError, ssl.SSLError):
+            continue
+        if _has_roots(context):
+            log.info("TLS: loaded CA certificates from %s", directory)
+            return context
+
+    try:
+        import certifi  # noqa: PLC0415 - optional, only worth importing here
+        context.load_verify_locations(cafile=certifi.where())
+        if _has_roots(context):
+            log.info("TLS: loaded CA bundle from certifi")
+            return context
+    except Exception:  # noqa: BLE001 - certifi is a nicety, not a requirement
+        pass
+
+    log.warning("TLS: no CA bundle found; HTTPS requests will probably fail")
+    return context
+
+
+# urllib wraps the OpenSSL message, which a toast cuts off before the half
+# that says what is wrong.
+def _reason(exc: urllib.error.URLError) -> str:
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return "no usable CA certificates, so GitHub's certificate cannot be verified"
+    if isinstance(reason, ssl.SSLError):
+        return f"TLS error ({reason.reason or 'unknown'})"
+    if isinstance(reason, TimeoutError):
+        return "timed out"
+    return str(reason)
+
+
+def _has_roots(context: ssl.SSLContext) -> bool:
+    try:
+        return context.cert_store_stats().get("x509_ca", 0) > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def trust_source() -> str:
+    context = ssl_context()
+    return f"{context.cert_store_stats().get('x509_ca', 0)} CA certificates loaded"
 
 
 # --------------------------------------------------------------------------
@@ -61,7 +149,8 @@ def _api_get(url: str, timeout: float = 20.0):
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout,
+                                context=ssl_context()) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -117,12 +206,12 @@ def remote_release(timeout: float = 20.0) -> dict:
         # A 404 here means every release is a prerelease or a draft.
         log.warning("no published latest release, scanning the rest")
     except urllib.error.URLError as exc:
-        raise ReleaseError(f"Could not reach GitHub: {exc.reason}") from exc
+        raise ReleaseError(f"Could not reach GitHub: {_reason(exc)}") from exc
 
     try:
         releases = _api_get(f"{API_ROOT}/repos/{REPO}/releases?per_page=30", timeout)
     except urllib.error.URLError as exc:
-        raise ReleaseError(f"Could not reach GitHub: {exc.reason}") from exc
+        raise ReleaseError(f"Could not reach GitHub: {_reason(exc)}") from exc
 
     for release in releases:
         if release.get("draft"):
@@ -229,7 +318,8 @@ def _download(url: str, destination: Path, expected_sha: str, expected_size: int
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     digest = hashlib.sha256()
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=60,
+                                    context=ssl_context()) as response:
             total = int(response.headers.get("Content-Length") or expected_size or 0)
             done = 0
             with open(partial, "wb") as handle:
@@ -244,7 +334,7 @@ def _download(url: str, destination: Path, expected_sha: str, expected_size: int
                         progress(done, total)
     except urllib.error.URLError as exc:
         partial.unlink(missing_ok=True)
-        raise ReleaseError(f"Download failed: {exc.reason}") from exc
+        raise ReleaseError(f"Download failed: {_reason(exc)}") from exc
 
     if expected_sha and digest.hexdigest() != expected_sha:
         partial.unlink(missing_ok=True)
@@ -394,7 +484,7 @@ def remote_patcher(timeout: float = 20.0) -> dict:
     except urllib.error.HTTPError as exc:
         raise ReleaseError(f"GitHub returned HTTP {exc.code} for OptiPatcher") from exc
     except urllib.error.URLError as exc:
-        raise ReleaseError(f"Could not reach GitHub: {exc.reason}") from exc
+        raise ReleaseError(f"Could not reach GitHub: {_reason(exc)}") from exc
 
     asset = None
     for candidate in release.get("assets") or []:
@@ -407,13 +497,17 @@ def remote_patcher(timeout: float = 20.0) -> dict:
     digest = asset.get("digest") or ""
     sha256 = digest.split("sha256:", 1)[1] if "sha256:" in digest else ""
     body = release.get("body") or ""
-    match = _BASE_VERSION.search(body)
+    base = _BASE_VERSION.search(body)
+    commit = _BUILD_COMMIT.search(body)
+    # The base version stays put across rebuilds, so alone it reads as
+    # "v0.41 - update available (v0.41)". The build commit is what moves.
     return {
         "asset_name": PATCHER_NAME,
         "asset_url": asset.get("browser_download_url") or "",
         "size": asset.get("size") or 0,
         "sha256": sha256,
-        "version": match.group(1) if match else (sha256[:7] or PATCHER_TAG),
+        "version": base.group(1) if base else (sha256[:7] or PATCHER_TAG),
+        "build": (commit.group(1)[:7] if commit else sha256[:7]),
         "published_at": release.get("published_at") or release.get("updated_at") or "",
         "html_url": release.get("html_url") or PATCHER_URL,
         "fetched_at": int(time.time()),
@@ -427,7 +521,8 @@ def local_patcher() -> Optional[dict]:
         with open(_patcher_meta_path(), "r", encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, ValueError):
-        return {"version": "unknown", "sha256": "", "asset_name": PATCHER_NAME}
+        return {"version": "unknown", "build": "", "sha256": "",
+                "asset_name": PATCHER_NAME}
 
 
 def _adopt_local_patcher() -> Optional[dict]:
@@ -441,7 +536,7 @@ def _adopt_local_patcher() -> Optional[dict]:
             shutil.copy2(candidate, patcher_file())
         digest = sha256_of(patcher_file())
         meta = {"asset_name": PATCHER_NAME, "sha256": digest,
-                "version": digest[:7], "source": "local",
+                "version": digest[:7], "build": digest[:7], "source": "local",
                 "html_url": PATCHER_URL, "installed_at": int(time.time())}
         _write_patcher_meta(meta)
         return meta
@@ -488,9 +583,11 @@ def patcher_status(check_remote: bool = False, timeout: float = 20.0) -> dict:
     result = {
         "installed": local is not None,
         "local_version": (local or {}).get("version", ""),
+        "local_build": (local or {}).get("build", ""),
         "local_sha256": (local or {}).get("sha256", ""),
         "update_available": False,
         "remote_version": "",
+        "remote_build": "",
         "release_url": PATCHER_URL,
         "error": "",
     }
@@ -506,8 +603,15 @@ def patcher_status(check_remote: bool = False, timeout: float = 20.0) -> dict:
         return result
 
     result["remote_version"] = remote["version"]
+    result["remote_build"] = remote.get("build", "")
     if local is None:
         result["update_available"] = True
     elif remote.get("sha256") and local.get("sha256"):
         result["update_available"] = remote["sha256"] != local["sha256"]
     return result
+
+
+# ensure_patcher keeps whatever is cached so installing a game never becomes
+# a surprise download. Updating is therefore explicit.
+def refresh_patcher(progress: Optional[Callable[[int, int], None]] = None) -> dict:
+    return fetch_patcher(remote_patcher(), progress)

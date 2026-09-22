@@ -32,8 +32,10 @@ export interface Defaults {
 export interface PatcherStatus {
   installed: boolean;
   local_version: string;
+  local_build: string;
   update_available: boolean;
   remote_version: string;
+  remote_build: string;
   release_url: string;
   error: string;
 }

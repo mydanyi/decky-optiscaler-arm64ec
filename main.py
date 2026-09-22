@@ -34,6 +34,10 @@ class Plugin:
         paths.ensure_dirs()
         self._deploy_launch_script()
         log.info("OptiScaler loaded; data dir %s", paths.runtime_dir())
+        try:
+            log.info("TLS trust: %s", release.trust_source())
+        except Exception as exc:  # noqa: BLE001
+            log.error("could not establish TLS trust: %s", exc)
 
     async def _unload(self) -> None:
         log.info("OptiScaler unloaded")
@@ -113,6 +117,15 @@ class Plugin:
                 return release.fetch_release(meta)
 
             meta = await asyncio.to_thread(work)
+
+            # ensure_patcher keeps the cached copy, so without this an update
+            # would never land. Only for users who already have it.
+            if release.local_patcher() is not None:
+                try:
+                    await asyncio.to_thread(release.refresh_patcher)
+                except Exception as exc:  # noqa: BLE001 - never fail the build update
+                    log.error("OptiPatcher update failed: %s", exc)
+
             return _ok(build=release.status(check_remote=False),
                        patcher=release.patcher_status(check_remote=False),
                        version=meta.get("version", ""))
