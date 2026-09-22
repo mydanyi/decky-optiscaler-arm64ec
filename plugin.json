@@ -1,0 +1,10 @@
+{
+  "name": "OptiScaler",
+  "author": "justradical",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["OptiScaler", "upscaling", "SGSR2", "ARM64", "Proton"],
+    "description": "Installs the ARM64EC OptiScaler/SGSR2 build into Steam games. Per-game loader DLL and NVIDIA spoofing, installs beside both the game root and the real binary, and wires up WINEDLLOVERRIDES through a launch wrapper so you never have to edit launch options by hand."
+  }
+}
