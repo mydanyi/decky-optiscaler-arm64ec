@@ -122,6 +122,16 @@ else
     fi
 fi
 
+# The native panel's language: one plain token the plugin writes, read here
+# with the smallest possible machinery. Only the first few bytes matter, and a
+# missing or unexpected file means English. Nothing else is touched.
+ui_language=en
+if [ -f "$DATA_DIR/ui-language" ]; then
+    ui_pref=$(head -c 16 "$DATA_DIR/ui-language" 2>/dev/null | tr -d '\r\n')
+    [ "$ui_pref" = "zh-CN" ] && ui_language=zh-CN
+fi
+export OPTISCALER_UI_LANGUAGE="$ui_language"
+
 if [ "$#" -eq 0 ]; then
     log "nothing to execute"
     exit 0

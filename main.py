@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import secrets
 import shutil
 import stat
 from pathlib import Path
@@ -23,6 +25,42 @@ def _ok(**payload) -> dict:
 def _fail(message: str, **payload) -> dict:
     log.error("OptiScaler: %s", message)
     return dict(payload, ok=False, error=str(message))
+
+
+# --------------------------------------------------------------------------
+# interface language preference
+# --------------------------------------------------------------------------
+
+# Identifiers that mean "Simplified Chinese" with certainty. Everything else -
+# Traditional Chinese, any other language, blank - stays English, so a browser
+# or Decky locale can never force Chinese on a Steam player who is not using it.
+_UI_LOCALE_TAGS = frozenset({
+    "schinese", "steamchina-schinese", "zh", "zh-cn", "zh-hans", "zh-hans-cn", "zh-sg",
+})
+
+
+def _normalize_ui_locale(language) -> str:
+    """Return ``"zh-CN"`` only for confirmed Simplified Chinese, else ``"en"``."""
+    tag = str(language or "").strip().lower().replace("_", "-")
+    return "zh-CN" if tag in _UI_LOCALE_TAGS else "en"
+
+
+def _write_ui_language(target: Path, locale: str) -> None:
+    """Atomically write the plain-text ``en``/``zh-CN`` preference (one line)."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / f".{target.name}.{os.getpid()}.{secrets.token_hex(16)}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(f"{locale}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 class Plugin:
@@ -326,6 +364,18 @@ class Plugin:
                        changed=merged != current)
         except Exception as exc:  # noqa: BLE001
             return _fail(f"Could not build launch options: {exc}")
+
+    # The launch wrapper and the native panel read this plain token. Only a
+    # confirmed Simplified Chinese selection becomes "zh-CN"; everything else
+    # is "en", and no other file is touched.
+    async def set_ui_locale(self, language: str) -> dict:
+        try:
+            locale = _normalize_ui_locale(language)
+            target = paths.data_home() / "ui-language"
+            await asyncio.to_thread(_write_ui_language, target, locale)
+            return _ok(language=locale)
+        except Exception as exc:  # noqa: BLE001
+            return _fail(f"Could not save the interface language: {exc}")
 
     async def log_frontend(self, message: str) -> None:
         log.info("OptiScaler frontend: %s", message)

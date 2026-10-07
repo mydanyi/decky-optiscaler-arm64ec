@@ -137,3 +137,6 @@ export const computeLaunchOptions = callable<
 >("compute_launch_options");
 
 export const logFrontend = callable<[message: string], void>("log_frontend");
+
+export const setUiLocale =
+  callable<[language: string], Result & { language: string }>("set_ui_locale");

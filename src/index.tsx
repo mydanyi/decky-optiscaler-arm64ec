@@ -34,6 +34,9 @@ import {
   updateGameSettings,
 } from "./api";
 import { readLaunchOptions, writeLaunchOptions } from "./steam";
+import { t as translateText } from "./i18n";
+import type { Translator } from "./i18n";
+import { initializeLocaleSync, useLocale } from "./useLocale";
 
 // Decky tears the panel down whenever a menu takes the foreground, so state
 // held in the component does not survive opening a dropdown.
@@ -80,10 +83,11 @@ function useCached<K extends keyof PanelCache>(key: K) {
 }
 
 const notify = (title: string, body: string) =>
-  toaster.toast({ title, body, duration: 4000 });
+  toaster.toast({ title, body: translateText(body), duration: 4000 });
 
 function report(label: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
+  // The log keeps the original message; only the toast is localized.
   void logFrontend(`${label}: ${message}`);
   notify("OptiScaler", message);
 }
@@ -105,6 +109,7 @@ function BuildSection({
   patcher,
   busy,
   managedCount,
+  t,
   onCheck,
   onDownload,
   onRefreshInstalls,
@@ -113,20 +118,24 @@ function BuildSection({
   patcher: PatcherStatus;
   busy: string;
   managedCount: number;
+  t: Translator;
   onCheck: () => void;
   onDownload: () => void;
   onRefreshInstalls: () => void;
 }) {
   const status = !build.installed
-    ? "Not downloaded yet"
+    ? t("Not downloaded yet")
     : build.update_available
-      ? `${build.local_version}, update available (${build.remote_version})`
-      : `${build.local_version}${build.remote_version ? ", up to date" : ""}`;
+      ? t("{version}, update available ({remoteVersion})", {
+          version: build.local_version,
+          remoteVersion: build.remote_version,
+        })
+      : `${build.local_version}${build.remote_version ? t(", up to date") : ""}`;
 
   return (
-    <PanelSection title="OptiScaler build">
+    <PanelSection title={t("OptiScaler build")}>
       <PanelSectionRow>
-        <Field label="Version" focusable={true} bottomSeparator="none">
+        <Field label={t("Version")} focusable={true} bottomSeparator="none">
           {status}
         </Field>
       </PanelSectionRow>
@@ -137,14 +146,14 @@ function BuildSection({
             {/* The base version stays put across rebuilds of the rolling tag,
                 so the build id is what tells two releases apart. */}
             {[patcher.local_version, patcher.local_build].filter(Boolean).join(" · ")}
-            {patcher.update_available && ", update available"}
+            {patcher.update_available && t(", update available")}
           </Field>
         </PanelSectionRow>
       )}
 
       <PanelSectionRow>
         <ButtonItem layout="below" disabled={busy !== ""} onClick={onCheck}>
-          {busy === "check" ? <Spinner width={16} height={16} /> : "Check for updates"}
+          {busy === "check" ? <Spinner width={16} height={16} /> : t("Check for updates")}
         </ButtonItem>
       </PanelSectionRow>
 
@@ -154,9 +163,9 @@ function BuildSection({
             {busy === "download" ? (
               <Spinner width={16} height={16} />
             ) : build.installed ? (
-              "Download update"
+              t("Download update")
             ) : (
-              "Download OptiScaler"
+              t("Download OptiScaler")
             )}
           </ButtonItem>
         </PanelSectionRow>
@@ -166,13 +175,14 @@ function BuildSection({
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            description={`Re-copy this build into the ${managedCount} game${
-              managedCount === 1 ? "" : "s"
-            } you have set up.`}
+            description={t("Re-copy this build into the {count} game{plural} you have set up.", {
+              count: managedCount,
+              plural: managedCount === 1 ? "" : "s",
+            })}
             disabled={busy !== ""}
             onClick={onRefreshInstalls}
           >
-            {busy === "refresh" ? <Spinner width={16} height={16} /> : "Update installed games"}
+            {busy === "refresh" ? <Spinner width={16} height={16} /> : t("Update installed games")}
           </ButtonItem>
         </PanelSectionRow>
       )}
@@ -183,10 +193,12 @@ function BuildSection({
 function TargetList({
   targets,
   selected,
+  t,
   onToggle,
 }: {
   targets: Target[];
   selected: string[];
+  t: Translator;
   onToggle: (path: string, on: boolean) => void;
 }) {
   return (
@@ -194,7 +206,13 @@ function TargetList({
       {targets.map((target) => (
         <PanelSectionRow key={target.path}>
           <ToggleField
-            label={target.primary ? "Game root" : target.reason}
+            label={
+              target.primary
+                ? t("Game root")
+                : target.reason === "Previously installed"
+                  ? t("Previously installed")
+                  : target.reason
+            }
             description={target.exe || target.path}
             checked={selected.includes(target.path)}
             onChange={(on: boolean) => onToggle(target.path, on)}
@@ -207,6 +225,7 @@ function TargetList({
 
 function Content() {
   const visible = useQuickAccessVisible();
+  const { locale, t } = useLocale();
   const [state, setState] = useCached("state");
   const [games, setGames] = useCached("games");
   const [appid, setAppid] = useCached("appid");
@@ -330,8 +349,8 @@ function Content() {
       notify(
         "OptiScaler",
         result.build.update_available
-          ? `Update available: ${result.build.remote_version}`
-          : "You are on the latest build.",
+          ? t("Update available: {version}", { version: result.build.remote_version })
+          : t("You are on the latest build."),
       );
     } catch (error) {
       report("check_for_updates", error);
@@ -349,7 +368,7 @@ function Content() {
         return;
       }
       if (cache.state) setState({ ...cache.state, build: result.build, patcher: result.patcher });
-      notify("OptiScaler", `Build ${result.version} ready.`);
+      notify("OptiScaler", t("Build {version} ready.", { version: result.version }));
     } catch (error) {
       report("download_build", error);
     } finally {
@@ -367,8 +386,16 @@ function Content() {
       }
       notify(
         "OptiScaler",
-        `Updated ${result.updated.length} game${result.updated.length === 1 ? "" : "s"}` +
-          (result.failed.length ? `, ${result.failed.length} failed.` : "."),
+        result.failed.length
+          ? t("Updated {count} game{plural}, {failed} failed.", {
+              count: result.updated.length,
+              plural: result.updated.length === 1 ? "" : "s",
+              failed: result.failed.length,
+            })
+          : t("Updated {count} game{plural}.", {
+              count: result.updated.length,
+              plural: result.updated.length === 1 ? "" : "s",
+            }),
       );
       await loadDetails(appid);
     } catch (error) {
@@ -390,9 +417,11 @@ function Content() {
       await syncLaunchOptions(appid, true);
       notify(
         "OptiScaler",
-        `Installed as ${dll} in ${result.manifest.directories.length} folder${
-          result.manifest.directories.length === 1 ? "" : "s"
-        }. Launch options set.`,
+        t("Installed as {dll} in {count} folder{plural}. Launch options set.", {
+          dll,
+          count: result.manifest.directories.length,
+          plural: result.manifest.directories.length === 1 ? "" : "s",
+        }),
       );
       await Promise.all([loadDetails(appid), loadGames(), loadState()]);
     } catch (error) {
@@ -416,7 +445,10 @@ function Content() {
       }
       notify(
         "OptiScaler",
-        `Removed from ${result.removed.length} folder${result.removed.length === 1 ? "" : "s"}.`,
+        t("Removed from {count} folder{plural}.", {
+          count: result.removed.length,
+          plural: result.removed.length === 1 ? "" : "s",
+        }),
       );
       await Promise.all([loadDetails(appid), loadGames(), loadState()]);
     } catch (error) {
@@ -448,7 +480,7 @@ function Content() {
           installed: Boolean(result.manifest),
         });
       }
-      if (result.manifest) notify("OptiScaler", `Now loading as ${nextDll}.`);
+      if (result.manifest) notify("OptiScaler", t("Now loading as {dll}.", { dll: nextDll }));
     } catch (error) {
       report("update_game_settings", error);
     } finally {
@@ -484,22 +516,22 @@ function Content() {
     () =>
       (state?.dll_choices ?? []).map((choice: DllChoice) => ({
         data: choice.name,
-        label: choice.label,
+        label: t(choice.label),
       })),
-    [state],
+    [state, locale, t],
   );
 
   if (loadError) {
     return (
       <PanelSection title="OptiScaler">
         <PanelSectionRow>
-          <Field label="Something went wrong" focusable={true}>
-            {loadError}
+          <Field label={t("Something went wrong")} focusable={true}>
+            {t(loadError)}
           </Field>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => void loadState()}>
-            Retry
+            {t("Retry")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
@@ -526,23 +558,24 @@ function Content() {
         patcher={state.patcher}
         busy={busy}
         managedCount={state.managed_count}
+        t={t}
         onCheck={runCheck}
         onDownload={runDownload}
         onRefreshInstalls={runRefresh}
       />
 
-      <PanelSection title="Per-game setup">
+      <PanelSection title={t("Per-game setup")}>
         {games.length === 0 ? (
           <PanelSectionRow>
-            <Field label="No games found" focusable={true}>
-              No installed Steam games were detected.
+            <Field label={t("No games found")} focusable={true}>
+              {t("No installed Steam games were detected.")}
             </Field>
           </PanelSectionRow>
         ) : (
           <PanelSectionRow>
             <DropdownItem
-              label="Game"
-              menuLabel="Choose a game"
+              label={t("Game")}
+              menuLabel={t("Choose a game")}
               rgOptions={gameOptions}
               selectedOption={appid}
               onChange={(option) => setAppid(option.data as string)}
@@ -559,20 +592,23 @@ function Content() {
         {details && (
           <>
             <PanelSectionRow>
-              <Field label="Status" focusable={true} bottomSeparator="none">
+              <Field label={t("Status")} focusable={true} bottomSeparator="none">
                 {installed
-                  ? `Installed as ${details.manifest?.dll} (build ${
-                      details.manifest?.version || "?"
-                    })`
-                  : "Not installed"}
+                  ? t("Installed as {dll} (build {version})", {
+                      dll: details.manifest?.dll ?? "",
+                      version: details.manifest?.version || "?",
+                    })
+                  : t("Not installed")}
               </Field>
             </PanelSectionRow>
 
             <PanelSectionRow>
               <DropdownItem
-                label="Loader DLL"
-                description="The filename OptiScaler is installed as. Change it if another mod already uses this name."
-                menuLabel="Loader DLL"
+                label={t("Loader DLL")}
+                description={t(
+                  "The filename OptiScaler is installed as. Change it if another mod already uses this name.",
+                )}
+                menuLabel={t("Loader DLL")}
                 rgOptions={dllOptions}
                 selectedOption={dll}
                 onChange={(option) => void applySettings(option.data as string, spoof, optipatcher)}
@@ -581,8 +617,10 @@ function Content() {
 
             <PanelSectionRow>
               <ToggleField
-                label="NVIDIA spoofing"
-                description="Report an NVIDIA GPU so games will offer DLSS for OptiScaler to intercept."
+                label={t("NVIDIA spoofing")}
+                description={t(
+                  "Report an NVIDIA GPU so games will offer DLSS for OptiScaler to intercept.",
+                )}
                 checked={spoof}
                 onChange={(on: boolean) => void applySettings(dll, on, optipatcher)}
               />
@@ -590,18 +628,25 @@ function Content() {
 
             <PanelSectionRow>
               <ToggleField
-                label="Load OptiPatcher"
-                description="Adds OptiPatcher as an OptiScaler plugin. It patches games that gate DLSS behind their own checks, so OptiScaler has something to intercept."
+                label={t("Load OptiPatcher")}
+                description={t(
+                  "Adds OptiPatcher as an OptiScaler plugin. It patches games that gate DLSS behind their own checks, so OptiScaler has something to intercept.",
+                )}
                 checked={optipatcher}
                 onChange={(on: boolean) => void applySettings(dll, spoof, on)}
               />
             </PanelSectionRow>
 
             <PanelSectionRow>
-              <Field label="Install locations" focusable={true} bottomSeparator="none" />
+              <Field label={t("Install locations")} focusable={true} bottomSeparator="none" />
             </PanelSectionRow>
 
-            <TargetList targets={details.targets} selected={selected} onToggle={toggleTarget} />
+            <TargetList
+              targets={details.targets}
+              selected={selected}
+              t={t}
+              onToggle={toggleTarget}
+            />
 
             <PanelSectionRow>
               <ButtonItem
@@ -609,17 +654,17 @@ function Content() {
                 disabled={busy !== "" || !buildReady || selected.length === 0}
                 description={
                   !buildReady
-                    ? "Download the OptiScaler build first."
-                    : "Copies the DLL and config, then sets the launch options for you."
+                    ? t("Download the OptiScaler build first.")
+                    : t("Copies the DLL and config, then sets the launch options for you.")
                 }
                 onClick={runInstall}
               >
                 {busy === "install" ? (
                   <Spinner width={16} height={16} />
                 ) : installed ? (
-                  "Reinstall"
+                  t("Reinstall")
                 ) : (
-                  "Install into this game"
+                  t("Install into this game")
                 )}
               </ButtonItem>
             </PanelSectionRow>
@@ -629,13 +674,15 @@ function Content() {
                 <ButtonItem
                   layout="below"
                   disabled={busy !== ""}
-                  description="Restores any files that were replaced and clears the launch options."
+                  description={t(
+                    "Restores any files that were replaced and clears the launch options.",
+                  )}
                   onClick={runUninstall}
                 >
                   {busy === "uninstall" ? (
                     <Spinner width={16} height={16} />
                   ) : (
-                    "Remove from this game"
+                    t("Remove from this game")
                   )}
                 </ButtonItem>
               </PanelSectionRow>
@@ -644,11 +691,11 @@ function Content() {
         )}
       </PanelSection>
 
-      <PanelSection title="Defaults for new games">
+      <PanelSection title={t("Defaults for new games")}>
         <PanelSectionRow>
           <DropdownItem
-            label="Loader DLL"
-            menuLabel="Default loader DLL"
+            label={t("Loader DLL")}
+            menuLabel={t("Default loader DLL")}
             rgOptions={dllOptions}
             selectedOption={state.defaults.default_dll}
             onChange={(option) =>
@@ -662,7 +709,7 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="NVIDIA spoofing"
+            label={t("NVIDIA spoofing")}
             checked={state.defaults.default_spoof}
             onChange={(on: boolean) =>
               void saveDefaults(state.defaults.default_dll, on, state.defaults.default_optipatcher)
@@ -671,7 +718,7 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Load OptiPatcher"
+            label={t("Load OptiPatcher")}
             checked={state.defaults.default_optipatcher}
             onChange={(on: boolean) =>
               void saveDefaults(state.defaults.default_dll, state.defaults.default_spoof, on)
@@ -683,11 +730,15 @@ function Content() {
   );
 }
 
-export default definePlugin(() => ({
-  name: "OptiScaler",
-  titleView: <div className={staticClasses.Title}>OptiScaler (ARM64EC)</div>,
-  content: <Content />,
-  icon: <FaExpandArrowsAlt />,
-  // Keep the panel mounted so opening a dropdown does not tear it down.
-  alwaysRender: true,
-}));
+export default definePlugin(() => {
+  // One-time at load: hand Steam's confirmed language to the native panel.
+  initializeLocaleSync();
+  return {
+    name: "OptiScaler",
+    titleView: <div className={staticClasses.Title}>OptiScaler (ARM64EC)</div>,
+    content: <Content />,
+    icon: <FaExpandArrowsAlt />,
+    // Keep the panel mounted so opening a dropdown does not tear it down.
+    alwaysRender: true,
+  };
+});

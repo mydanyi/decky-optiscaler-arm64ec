@@ -25,6 +25,19 @@ a game and install. Turn on DLSS, FSR or XeSS in the game's own graphics
 settings. OptiScaler replaces whichever one the game asks for, so native or TAA
 leaves it nothing to hook. `Shift+F2` opens its overlay.
 
+## Localization
+
+The plugin follows Steam's own language. With **Simplified Chinese** selected
+(`schinese`) the panel, its labels and its status and toast messages are shown
+in Chinese; every other Steam language, including Traditional Chinese, keeps
+the original English wording. The same preference is stored as a single
+`ui-language` token that the launch wrapper passes to compatible native cores,
+so their in-game panel can follow it too. This change only translates this
+plugin's own interface: translating the native overlay's own strings and
+bundling a CJK font are separate core companion changes and are not included
+here. Not every language is translated - only Simplified Chinese has a
+translation, and everything else falls back to the original English.
+
 ## Building
 
 ```bash
