@@ -137,3 +137,28 @@ export const computeLaunchOptions = callable<
 >("compute_launch_options");
 
 export const logFrontend = callable<[message: string], void>("log_frontend");
+
+// --------------------------------------------------------------------------
+// In-game overlay control (settings panel visibility / performance stats).
+// The backend reports only real, freshly-read core values; `available` is
+// false until a direct-control core is actually running for the game.
+// --------------------------------------------------------------------------
+
+export type OverlayAction = "menu" | "fps" | "language";
+export type OverlayValue = boolean | "en" | "zh-CN";
+
+export interface OverlayState extends Result {
+  available: boolean;
+  menu: boolean;
+  fps: boolean;
+  language: "en" | "zh-CN";
+  /** Present on set_overlay_state only: the core confirmed the change. */
+  ack?: boolean;
+}
+
+export const getOverlayState = callable<[appid: string], OverlayState>("get_overlay_state");
+
+export const setOverlayState = callable<
+  [appid: string, action: OverlayAction, value: OverlayValue],
+  OverlayState
+>("set_overlay_state");

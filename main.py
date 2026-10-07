@@ -11,6 +11,7 @@ import opti_release as release
 import opti_games as games
 import opti_install as installer
 import opti_profiles as profiles
+import opti_control as control
 
 logging.basicConfig(level=logging.INFO)
 log = decky.logger
@@ -23,6 +24,90 @@ def _ok(**payload) -> dict:
 def _fail(message: str, **payload) -> dict:
     log.error("OptiScaler: %s", message)
     return dict(payload, ok=False, error=str(message))
+
+
+# --------------------------------------------------------------------------
+# in-game overlay control
+# --------------------------------------------------------------------------
+
+# The mailbox the in-game core watches lives in the game's own install tree.
+# Availability is only ever proven by a fresh, real state file; a completed
+# install or an INI on disk proves nothing about a running core.
+CONTROL_LEAF = control.CONTROL_DIR_NAME
+
+_NO_GAME = "No installed Steam game matches this app id."
+_NO_CORE = "Start the game with the direct-control build first."
+_NO_ACK = (
+    "The OptiScaler core did not confirm the change. "
+    "Try again while the game is running."
+)
+_BAD_REQUEST = "Unsupported OptiScaler control request."
+
+
+def _overlay_unavailable(message: str, *, ack=None) -> dict:
+    """The one shape an unavailable core reports: real fields, no invented state."""
+    result = {
+        "ok": False,
+        "error": str(message),
+        "available": False,
+        "menu": False,
+        "fps": False,
+        "language": "en",
+    }
+    if ack is not None:
+        result["ack"] = bool(ack)
+    return result
+
+
+def _overlay_values(state: dict) -> dict:
+    return {
+        "ok": True,
+        "error": "",
+        "available": True,
+        "menu": state.get("menu") == "1",
+        "fps": state.get("fps") == "1",
+        "language": state.get("language", "en"),
+    }
+
+
+def _probe(appid: str):
+    """Find the live mailbox for ``appid``.
+
+    Returns ``(control_dir, state, reason)``. ``state`` is a fresh, parsed
+    mailbox state; when it is ``None`` ``reason`` is a short English
+    explanation. A recorded directory is trusted only while it still resolves
+    inside the game's install root, and the ``OptiScaler`` leaf may not be a
+    symlink - ``opti_control.resolve_control_dir`` enforces both.
+    """
+    game = games.game_by_appid(appid)
+    if not game:
+        return None, None, _NO_GAME
+    try:
+        root = Path(game["install_dir"]).resolve()
+    except (OSError, RuntimeError):
+        return None, None, _NO_GAME
+
+    manifest = installer.read_install_manifest(appid) or {}
+    for raw in manifest.get("directories") or []:
+        try:
+            directory = Path(str(raw)).resolve()
+        except (OSError, RuntimeError):
+            continue
+        # A hand-edited or stale manifest must never aim the mailbox at some
+        # directory outside the game we believe we are controlling.
+        if directory != root and root not in directory.parents:
+            continue
+        try:
+            control_dir = control.resolve_control_dir(directory, CONTROL_LEAF)
+        except control.ControlError:
+            continue
+        state = control.read_state(
+            control_dir / control.STATE_NAME,
+            max_age=control.STATE_MAX_AGE_SECONDS,
+        )
+        if state is not None:
+            return control_dir, state, ""
+    return None, None, _NO_CORE
 
 
 class Plugin:
@@ -326,6 +411,79 @@ class Plugin:
                        changed=merged != current)
         except Exception as exc:  # noqa: BLE001
             return _fail(f"Could not build launch options: {exc}")
+
+    # ------------------------------------------------------------------
+    # in-game overlay: settings panel and performance stats
+    # ------------------------------------------------------------------
+
+    # Reads are cheap and prove nothing on their own, so they never write.
+    async def get_overlay_state(self, appid: str) -> dict:
+        try:
+            appid = str(appid)
+            _control_dir, state, reason = await asyncio.to_thread(_probe, appid)
+            if state is None:
+                return _overlay_unavailable(reason or _NO_CORE)
+            return _overlay_values(state)
+        except Exception as exc:  # noqa: BLE001
+            log.error("OptiScaler: overlay read failed: %s", exc)
+            return _overlay_unavailable(f"Could not read the in-game overlay state: {exc}")
+
+    # One mailbox per app, serialised, so two quick taps cannot steal each
+    # other's acknowledgement.
+    def _overlay_lock(self, appid: str) -> asyncio.Lock:
+        locks = getattr(self, "_overlay_locks", None)
+        if locks is None:
+            locks = {}
+            self._overlay_locks = locks
+        lock = locks.get(appid)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[appid] = lock
+        return lock
+
+    async def set_overlay_state(self, appid: str, action: str, value) -> dict:
+        try:
+            appid = str(appid)
+            try:
+                control.validate_action_value(action, value)
+            except control.InvalidRequest:
+                return _overlay_unavailable(_BAD_REQUEST, ack=False)
+
+            control_dir, state, reason = await asyncio.to_thread(_probe, appid)
+            if state is None:
+                return _overlay_unavailable(reason or _NO_CORE, ack=False)
+
+            async with self._overlay_lock(appid):
+                return await self._send_overlay(control_dir, action, value)
+        except Exception as exc:  # noqa: BLE001
+            log.error("OptiScaler: overlay command failed: %s", exc)
+            return _overlay_unavailable(_NO_ACK, ack=False)
+
+    async def _send_overlay(self, control_dir, action: str, value) -> dict:
+        # Default session: adopt only the launch session the core published in
+        # a fresh state. Without one there is nothing to talk to.
+        controller = control.Controller(control_dir, session=None)
+        if controller.session is None:
+            return _overlay_unavailable(_NO_CORE, ack=False)
+
+        # The blocking poll must never stall the event loop; two seconds is the
+        # protocol budget.
+        acknowledged = await asyncio.to_thread(
+            controller.send, action, value, timeout=2.0, interval=0.05)
+        if not acknowledged:
+            return _overlay_unavailable(_NO_ACK, ack=False)
+
+        # Report what the core actually applied, not what we asked for.
+        state = await asyncio.to_thread(
+            control.read_state,
+            control_dir / control.STATE_NAME,
+            control.STATE_MAX_AGE_SECONDS,
+        )
+        if state is None:
+            return _overlay_unavailable(_NO_ACK, ack=False)
+        result = _overlay_values(state)
+        result["ack"] = True
+        return result
 
     async def log_frontend(self, message: str) -> None:
         log.info("OptiScaler frontend: %s", message)

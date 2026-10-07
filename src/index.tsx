@@ -4,6 +4,7 @@ import {
   Field,
   PanelSection,
   PanelSectionRow,
+  Router,
   Spinner,
   ToggleField,
   staticClasses,
@@ -18,18 +19,21 @@ import {
   PatcherStatus,
   Game,
   GameDetails,
+  OverlayState,
   PluginState,
   Target,
   checkForUpdates,
   computeLaunchOptions,
   downloadBuild,
   getGameDetails,
+  getOverlayState,
   getState,
   installGame,
   listGames,
   logFrontend,
   refreshInstalls,
   setDefaults,
+  setOverlayState,
   uninstallGame,
   updateGameSettings,
 } from "./api";
@@ -47,6 +51,9 @@ interface PanelCache {
   optipatcher: boolean;
   selected: string[];
   lastGameScan: number;
+  // The core's last reported visibility state for the selected game. Null
+  // means "not read yet", never "off".
+  overlay: OverlayState | null;
 }
 
 const cache: PanelCache = {
@@ -59,6 +66,7 @@ const cache: PanelCache = {
   optipatcher: false,
   selected: [],
   lastGameScan: 0,
+  overlay: null,
 };
 
 // Read __optiscaler.mounts in the Steam console: a climbing count means the
@@ -86,6 +94,17 @@ function report(label: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   void logFrontend(`${label}: ${message}`);
   notify("OptiScaler", message);
+}
+
+// The direct controls act on the game's own overlay, so the panel steps out of
+// the way once a command is on its way. If the API is missing the panel simply
+// stays open.
+function closeQuickAccessMenu(): void {
+  try {
+    Router.CloseSideMenus();
+  } catch {
+    /* the quick access menu may already be closing */
+  }
 }
 
 // Merge rules live in the backend where they are tested. This only supplies
@@ -215,6 +234,7 @@ function Content() {
   const [spoof, setSpoof] = useCached("spoof");
   const [optipatcher, setOptipatcher] = useCached("optipatcher");
   const [selected, setSelected] = useCached("selected");
+  const [overlay, setOverlay] = useCached("overlay");
   const [busy, setBusy] = useState<string>("");
   const [loadError, setLoadError] = useState<string>("");
 
@@ -292,6 +312,24 @@ function Content() {
     [applyDetails, setDetails],
   );
 
+  // The buttons must reflect the core's real, freshly-read state, so this only
+  // runs when the panel opens or the selected game changes - never on a timer.
+  const loadOverlay = useCallback(
+    async (id: string) => {
+      if (!id) {
+        setOverlay(null);
+        return;
+      }
+      try {
+        setOverlay(await getOverlayState(id));
+      } catch (error) {
+        setOverlay(null);
+        report("get_overlay_state", error);
+      }
+    },
+    [setOverlay],
+  );
+
   useEffect(() => {
     mountCount += 1;
     (window as any).__optiscaler = { mounts: mountCount, cache };
@@ -310,6 +348,12 @@ function Content() {
     if (Date.now() - cache.lastGameScan < RESCAN_AFTER_MS) return;
     void loadGames();
   }, [visible, loadGames]);
+
+  // Read the real core state whenever the panel opens or the game changes.
+  useEffect(() => {
+    if (!visible) return;
+    void loadOverlay(appid);
+  }, [visible, appid, loadOverlay]);
 
   // Only fetch when the selection actually changed.
   useEffect(() => {
@@ -471,6 +515,51 @@ function Content() {
     setSelected(next);
   };
 
+  // Re-read the actual state, then ask for the explicit opposite. The core has
+  // to acknowledge it, so the button never fakes a checked toggle.
+  const toggleOverlay = async (action: "menu" | "fps") => {
+    if (!appid) return;
+    setBusy("overlay");
+    try {
+      const current = await getOverlayState(appid);
+      setOverlay(current);
+      if (!current.available) {
+        notify(
+          "OptiScaler",
+          current.error || "Start the game with the direct-control build first.",
+        );
+        return;
+      }
+      const next = action === "menu" ? !current.menu : !current.fps;
+      const pending = setOverlayState(appid, action, next);
+      closeQuickAccessMenu();
+      const result = await pending;
+      setOverlay(result);
+      if (!result.ack) {
+        notify(
+          "OptiScaler",
+          result.error ||
+            "The OptiScaler core did not confirm the change. Try again while the game is running.",
+        );
+        return;
+      }
+      notify(
+        "OptiScaler",
+        action === "menu"
+          ? result.menu
+            ? "OptiScaler settings panel opened."
+            : "OptiScaler settings panel closed."
+          : result.fps
+            ? "OptiScaler performance stats shown."
+            : "OptiScaler performance stats hidden.",
+      );
+    } catch (error) {
+      report("set_overlay_state", error);
+    } finally {
+      setBusy("");
+    }
+  };
+
   const gameOptions = useMemo(
     () =>
       games.map((game) => ({
@@ -518,6 +607,7 @@ function Content() {
 
   const installed = Boolean(details?.installed);
   const buildReady = state.build.installed;
+  const overlayAvailable = Boolean(overlay?.available);
 
   return (
     <>
@@ -530,6 +620,43 @@ function Content() {
         onDownload={runDownload}
         onRefreshInstalls={runRefresh}
       />
+
+      {details && installed && (
+        <PanelSection title="In-game controls">
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== "" || !overlayAvailable}
+              description={
+                overlayAvailable
+                  ? undefined
+                  : "Start the game with the direct-control build first."
+              }
+              onClick={() => void toggleOverlay("menu")}
+            >
+              {overlay?.menu
+                ? "Close OptiScaler settings panel"
+                : "Open OptiScaler settings panel"}
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== "" || !overlayAvailable}
+              description={
+                overlayAvailable
+                  ? undefined
+                  : "Start the game with the direct-control build first."
+              }
+              onClick={() => void toggleOverlay("fps")}
+            >
+              {overlay?.fps
+                ? "Hide OptiScaler performance stats"
+                : "Show OptiScaler performance stats"}
+            </ButtonItem>
+          </PanelSectionRow>
+        </PanelSection>
+      )}
 
       <PanelSection title="Per-game setup">
         {games.length === 0 ? (

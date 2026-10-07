@@ -25,6 +25,27 @@ a game and install. Turn on DLSS, FSR or XeSS in the game's own graphics
 settings. OptiScaler replaces whichever one the game asks for, so native or TAA
 leaves it nothing to hook. `Shift+F2` opens its overlay.
 
+## In-game controls
+
+With a game set up, the panel shows an **In-game controls** section between the
+build section and **Per-game setup**. It holds two buttons that act on the
+game's own overlay: open or close the OptiScaler settings panel, and show or
+hide the OptiScaler performance stats. Each tap re-reads the core's live state,
+asks for the opposite, and closes the quick access menu while the command is on
+its way; the label only changes once the core has confirmed the new value, so it
+never reports a change the game did not make.
+
+There are no controller mappings. These two buttons are the only input the
+plugin adds, and no keyboard, timer or Steam Input binding is involved.
+
+The buttons need a core running inside the game that speaks companion protocol
+version 1 - the plugin writes `overlay.request` in the game's `OptiScaler`
+directory and waits for the matching `overlay.state`. Until such a core is
+running, both buttons stay disabled and say the game has to be started with the
+direct-control build first. A core for other OptiScaler builds is not included
+here, and nothing in this plugin promises that a stock Sloptiscaler or
+OptiScaler release already provides it.
+
 ## Building
 
 ```bash
