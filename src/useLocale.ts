@@ -133,8 +133,10 @@ export function useLocale(): LocaleTools {
     };
   }, [visible, apply]);
 
+  // The panel asks for wording by semantic key; the hook binds that key to the
+  // locale it detected.
   const t = useCallback<Translator>(
-    (englishSource, params) => translate(locale, englishSource, params),
+    (key, params) => translate(locale, key, params),
     [locale],
   );
 
